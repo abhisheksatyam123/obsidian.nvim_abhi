@@ -26,6 +26,10 @@ local command_lookups = {
   ObsidianExtractNote = "obsidian.commands.extract_note",
   ObsidianDebug = "obsidian.commands.debug",
   ObsidianTOC = "obsidian.commands.toc",
+  ObsidianSRSReview = "obsidian.commands.srs_review",
+  ObsidianSRSDue = "obsidian.commands.srs_due",
+  ObsidianSRSStats = "obsidian.commands.srs_stats",
+  ObsidianSRSBrowse = "obsidian.commands.srs_browse",
 }
 
 local M = setmetatable({
@@ -190,5 +194,13 @@ M.register(
 M.register("ObsidianDebug", { opts = { nargs = 0, desc = "Log some information for debugging" } })
 
 M.register("ObsidianTOC", { opts = { nargs = 0, desc = "Load the table of contents into a picker" } })
+
+M.register("ObsidianSRSReview", { opts = { nargs = 0, desc = "Review due flashcards with spaced repetition" } })
+
+M.register("ObsidianSRSDue", { opts = { nargs = 0, desc = "List all due flashcards in a picker" } })
+
+M.register("ObsidianSRSStats", { opts = { nargs = 0, desc = "Show spaced repetition statistics and upcoming reviews" } })
+
+M.register("ObsidianSRSBrowse", { opts = { nargs = "?", desc = "Browse all flashcards (optionally filter by tags)" } })
 
 return M

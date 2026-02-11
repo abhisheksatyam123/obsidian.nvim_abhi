@@ -17,6 +17,7 @@ local module_lookups = {
   Path = "obsidian.path",
   pickers = "obsidian.pickers",
   search = "obsidian.search",
+  srs = "obsidian.srs",
   templates = "obsidian.templates",
   ui = "obsidian.ui",
   util = "obsidian.util",

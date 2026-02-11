@@ -32,6 +32,7 @@ local config = {}
 ---@field ui obsidian.config.UIOpts | table<string, any>
 ---@field attachments obsidian.config.AttachmentsOpts
 ---@field callbacks obsidian.config.CallbackConfig
+---@field srs obsidian.config.SRSOpts
 config.ClientOpts = {}
 
 --- Get defaults.
@@ -65,6 +66,7 @@ config.ClientOpts.default = function()
     ui = config.UIOpts.default(),
     attachments = config.AttachmentsOpts.default(),
     callbacks = config.CallbackConfig.default(),
+    srs = config.SRSOpts.default(),
   }
 end
 
@@ -229,6 +231,7 @@ config.ClientOpts.normalize = function(opts, defaults)
   opts.templates = tbl_override(defaults.templates, opts.templates)
   opts.ui = tbl_override(defaults.ui, opts.ui)
   opts.attachments = tbl_override(defaults.attachments, opts.attachments)
+  opts.srs = tbl_override(defaults.srs, opts.srs)
 
   ---------------
   -- Validate. --
@@ -504,6 +507,30 @@ config.CallbackConfig = {}
 ---@return obsidian.config.CallbackConfig
 config.CallbackConfig.default = function()
   return {}
+end
+
+---@class obsidian.config.SRSOpts
+---
+---@field enabled boolean Whether to enable SRS commands.
+---@field max_new_per_day integer Maximum number of new cards to review per day.
+---@field max_reviews_per_day integer Maximum number of total reviews per day.
+---@field default_ease number Default ease factor (e.g. 2.5).
+---@field min_ease number Minimum ease factor (e.g. 1.3).
+---@field easy_bonus number Multiplier for "easy" responses (e.g. 1.3).
+---@field hard_interval number Multiplier for "hard" responses (e.g. 1.2).
+config.SRSOpts = {}
+
+---@return obsidian.config.SRSOpts
+config.SRSOpts.default = function()
+  return {
+    enabled = true,
+    max_new_per_day = 20,
+    max_reviews_per_day = 100,
+    default_ease = 2.5,
+    min_ease = 1.3,
+    easy_bonus = 1.3,
+    hard_interval = 1.2,
+  }
 end
 
 return config
