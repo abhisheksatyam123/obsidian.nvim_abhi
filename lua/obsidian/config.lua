@@ -1,0 +1,423 @@
+local log = require "obsidian.log"
+local util = require "obsidian.util"
+
+local config = {}
+
+---@class obsidian.config.ClientOpts
+---@field dir string|?
+---@field workspaces obsidian.workspace.WorkspaceSpec[]|?
+---@field log_level integer
+---@field notes_subdir string|?
+---@field templates obsidian.config.TemplateOpts
+---@field new_notes_location obsidian.config.NewNotesLocation
+---@field note_id_func (fun(title: string|?): string)|?
+---@field note_path_func (fun(spec: { id: string, dir: obsidian.Path, title: string|? }): string|obsidian.Path)|?
+---@field wiki_link_func (fun(opts: {path: string, label: string, id: string|?}): string)
+---@field markdown_link_func (fun(opts: {path: string, label: string, id: string|?}): string)
+---@field preferred_link_style obsidian.config.LinkStyle
+---@field follow_url_func fun(url: string)|?
+---@field follow_img_func fun(img: string)|?
+---@field note_frontmatter_func (fun(note: obsidian.Note): table)|?
+---@field disable_frontmatter (fun(fname: string?): boolean)|boolean|?
+---@field mappings obsidian.config.MappingOpts
+---@field daily_notes obsidian.config.DailyNotesOpts
+---@field use_advanced_uri boolean|?
+---@field open_app_foreground boolean|?
+---@field sort_by obsidian.config.SortBy|?
+---@field sort_reversed boolean|?
+---@field search_max_lines integer
+---@field open_notes_in obsidian.config.OpenStrategy
+---@field ui obsidian.config.UIOpts | table<string, any>
+---@field attachments obsidian.config.AttachmentsOpts
+---@field callbacks obsidian.config.CallbackConfig
+---@field srs obsidian.config.SRSOpts
+---@field tasks obsidian.config.TasksOpts
+config.ClientOpts = {}
+
+--- Get defaults.
+---
+---@return obsidian.config.ClientOpts
+config.ClientOpts.default = function()
+  return {
+    dir = nil,
+    workspaces = {},
+    log_level = vim.log.levels.INFO,
+    notes_subdir = nil,
+    new_notes_location = config.NewNotesLocation.current_dir,
+    templates = config.TemplateOpts.default(),
+    note_id_func = nil,
+    wiki_link_func = util.wiki_link_id_prefix,
+    markdown_link_func = util.markdown_link,
+    preferred_link_style = config.LinkStyle.wiki,
+    follow_url_func = nil,
+    note_frontmatter_func = nil,
+    disable_frontmatter = false,
+    mappings = {},
+    daily_notes = config.DailyNotesOpts.default(),
+    use_advanced_uri = nil,
+    open_app_foreground = false,
+    sort_by = "modified",
+    sort_reversed = true,
+    search_max_lines = 1000,
+    open_notes_in = "current",
+    ui = config.UIOpts.default(),
+    attachments = config.AttachmentsOpts.default(),
+    callbacks = config.CallbackConfig.default(),
+    srs = config.SRSOpts.default(),
+    tasks = config.TasksOpts.default(),
+  }
+end
+
+local tbl_override = function(defaults, overrides)
+  local out = vim.tbl_extend("force", defaults, overrides)
+  for k, v in pairs(out) do
+    if v == vim.NIL then
+      out[k] = nil
+    end
+  end
+  return out
+end
+
+--- Normalize options.
+---
+---@param opts table<string, any>
+---@param defaults obsidian.config.ClientOpts|?
+---
+---@return obsidian.config.ClientOpts
+config.ClientOpts.normalize = function(opts, defaults)
+  if not defaults then
+    defaults = config.ClientOpts.default()
+  end
+
+  -------------------------------------------------------------------------------------
+  -- Rename old fields for backwards compatibility and warn about deprecated fields. --
+  -------------------------------------------------------------------------------------
+
+  if opts.ui and opts.ui.tick then
+    opts.ui.update_debounce = opts.ui.tick
+    opts.ui.tick = nil
+  end
+
+  if opts.wiki_link_func == "prepend_note_id" then
+    opts.wiki_link_func = util.wiki_link_id_prefix
+  elseif opts.wiki_link_func == "prepend_note_path" then
+    opts.wiki_link_func = util.wiki_link_path_prefix
+  elseif opts.wiki_link_func == "use_path_only" then
+    opts.wiki_link_func = util.wiki_link_path_only
+  elseif opts.wiki_link_func == "use_alias_only" then
+    opts.wiki_link_func = util.wiki_link_alias_only
+  elseif type(opts.wiki_link_func) == "string" then
+    error(string.format("invalid option '%s' for 'wiki_link_func'", opts.wiki_link_func))
+  end
+
+  if opts.detect_cwd ~= nil then
+    opts.detect_cwd = nil
+    log.warn_once(
+      "The 'detect_cwd' field is deprecated and no longer has any affect.\n"
+        .. "See https://github.com/abhisheksatyam123/obsidian.nvim_abhi/pull/366 for more details."
+    )
+  end
+
+
+  if opts.overwrite_mappings ~= nil then
+    log.warn_once "The 'overwrite_mappings' config option is deprecated and no longer has any affect."
+    opts.overwrite_mappings = nil
+  end
+
+  if opts.ui and opts.ui.checkboxes then
+    -- Add a default 'order' for backwards compat.
+    for i, char in ipairs { " ", "x" } do
+      if opts.ui.checkboxes[char] and not opts.ui.checkboxes[char].order then
+        opts.ui.checkboxes[char].order = i
+      end
+    end
+  end
+
+  if opts.templates and opts.templates.subdir then
+    opts.templates.folder = opts.templates.subdir
+    opts.templates.subdir = nil
+  end
+
+  if opts.image_name_func then
+    if opts.attachments == nil then
+      opts.attachments = {}
+    end
+    opts.attachments.img_name_func = opts.image_name_func
+    opts.image_name_func = nil
+  end
+
+  --------------------------
+  -- Merge with defaults. --
+  --------------------------
+
+  ---@type obsidian.config.ClientOpts
+  opts = tbl_override(defaults, opts)
+
+  opts.mappings = opts.mappings and opts.mappings or defaults.mappings
+  opts.daily_notes = tbl_override(defaults.daily_notes, opts.daily_notes)
+  opts.templates = tbl_override(defaults.templates, opts.templates)
+  opts.ui = tbl_override(defaults.ui, opts.ui)
+  opts.attachments = tbl_override(defaults.attachments, opts.attachments)
+  opts.srs = tbl_override(defaults.srs, opts.srs)
+  opts.tasks = tbl_override(defaults.tasks, opts.tasks)
+
+  ---------------
+  -- Validate. --
+  ---------------
+
+  if opts.sort_by ~= nil and not vim.tbl_contains(vim.tbl_values(config.SortBy), opts.sort_by) then
+    error("Invalid 'sort_by' option '" .. opts.sort_by .. "' in obsidian.nvim config.")
+  end
+
+  if not util.tbl_is_array(opts.workspaces) then
+    error "Invalid obsidian.nvim config, the 'config.workspaces' should be an array/list."
+  end
+
+  -- Convert dir to workspace format.
+  if opts.dir ~= nil then
+    table.insert(opts.workspaces, 1, { path = opts.dir })
+  end
+
+  return opts
+end
+
+---@enum obsidian.config.OpenStrategy
+config.OpenStrategy = {
+  current = "current",
+  vsplit = "vsplit",
+  hsplit = "hsplit",
+}
+
+---@enum obsidian.config.SortBy
+config.SortBy = {
+  path = "path",
+  modified = "modified",
+  accessed = "accessed",
+  created = "created",
+}
+
+---@enum obsidian.config.NewNotesLocation
+config.NewNotesLocation = {
+  current_dir = "current_dir",
+  notes_subdir = "notes_subdir",
+}
+
+---@enum obsidian.config.LinkStyle
+config.LinkStyle = {
+  wiki = "wiki",
+  markdown = "markdown",
+}
+
+---@class obsidian.config.MappingOpts
+config.MappingOpts = {}
+
+---Get defaults.
+---@return obsidian.config.MappingOpts
+config.MappingOpts.default = function()
+  local mappings = require "obsidian.mappings"
+
+  return {
+    ["gf"] = mappings.gf_passthrough(),
+    ["<leader>ch"] = mappings.toggle_checkbox(),
+    ["<cr>"] = mappings.smart_action(),
+  }
+end
+
+---@class obsidian.config.DailyNotesOpts
+---
+---@field folder string|?
+---@field date_format string|?
+---@field alias_format string|?
+---@field template string|?
+---@field default_tags string[]|?
+config.DailyNotesOpts = {}
+
+--- Get defaults.
+---
+---@return obsidian.config.DailyNotesOpts
+config.DailyNotesOpts.default = function()
+  return {
+    folder = nil,
+    date_format = nil,
+    alias_format = nil,
+    default_tags = { "daily-notes" },
+  }
+end
+
+---@class obsidian.config.TemplateOpts
+---
+---@field folder string|obsidian.Path|?
+---@field date_format string|?
+---@field time_format string|?
+---@field substitutions table<string, function|string>|?
+config.TemplateOpts = {}
+
+--- Get defaults.
+---
+---@return obsidian.config.TemplateOpts
+config.TemplateOpts.default = function()
+  return {
+    folder = nil,
+    date_format = nil,
+    time_format = nil,
+    substitutions = {},
+  }
+end
+
+---@class obsidian.config.UIOpts
+---
+---@field enable boolean
+---@field update_debounce integer
+---@field max_file_length integer|?
+---@field checkboxes table<string, obsidian.config.CheckboxSpec>
+---@field bullets obsidian.config.UICharSpec|?
+---@field external_link_icon obsidian.config.UICharSpec
+---@field reference_text obsidian.config.UIStyleSpec
+---@field highlight_text obsidian.config.UIStyleSpec
+---@field tags obsidian.config.UIStyleSpec
+---@field block_ids obsidian.config.UIStyleSpec
+---@field hl_groups table<string, table>
+config.UIOpts = {}
+
+---@class obsidian.config.UICharSpec
+---
+---@field char string
+---@field hl_group string
+
+---@class obsidian.config.CheckboxSpec : obsidian.config.UICharSpec
+---
+---@field char string
+---@field hl_group string
+---@field order integer
+
+---@class obsidian.config.UIStyleSpec
+---
+---@field hl_group string
+
+---@return obsidian.config.UIOpts
+config.UIOpts.default = function()
+  return {
+    enable = true,
+    update_debounce = 200,
+    max_file_length = 5000,
+    checkboxes = {
+      [" "] = { order = 1, char = "󰄱", hl_group = "ObsidianTodo" },
+      ["/"] = { order = 2, char = "🟢", hl_group = "ObsidianActive" },
+      ["|"] = { order = 3, char = "⏸", hl_group = "ObsidianPaused" },
+      ["?"] = { order = 4, char = "🚧", hl_group = "ObsidianBlocked" },
+      ["-"] = { order = 5, char = "❌", hl_group = "ObsidianCancelled" },
+      ["x"] = { order = 6, char = "✅", hl_group = "ObsidianDone" },
+      ["~"] = { order = 7, char = "󰰱", hl_group = "ObsidianTilde" },
+      ["!"] = { order = 8, char = "", hl_group = "ObsidianImportant" },
+      [">"] = { order = 9, char = "", hl_group = "ObsidianRightArrow" },
+    },
+    bullets = { char = "•", hl_group = "ObsidianBullet" },
+    external_link_icon = { char = "", hl_group = "ObsidianExtLinkIcon" },
+    reference_text = { hl_group = "ObsidianRefText" },
+    highlight_text = { hl_group = "ObsidianHighlightText" },
+    tags = { hl_group = "ObsidianTag" },
+    block_ids = { hl_group = "ObsidianBlockID" },
+    hl_groups = {
+      ObsidianTodo = { bold = true, fg = "#f78c6c" },
+      ObsidianActive = { bold = true, fg = "#89ddff" },
+      ObsidianPaused = { bold = true, fg = "#ffcb6b" },
+      ObsidianBlocked = { bold = true, fg = "#ff5370" },
+      ObsidianCancelled = { bold = true, fg = "#676e95" },
+      ObsidianDone = { bold = true, fg = "#c3e88d" },
+      ObsidianRightArrow = { bold = true, fg = "#f78c6c" },
+      ObsidianTilde = { bold = true, fg = "#ff5370" },
+      ObsidianImportant = { bold = true, fg = "#d73128" },
+      ObsidianBullet = { bold = true, fg = "#89ddff" },
+      ObsidianRefText = { underline = true, fg = "#c792ea" },
+      ObsidianExtLinkIcon = { fg = "#c792ea" },
+      ObsidianTag = { italic = true, fg = "#89ddff" },
+      ObsidianP1 = { bold = true, fg = "#ff5370" },
+      ObsidianP2 = { bold = true, fg = "#ffcb6b" },
+      ObsidianP3 = { bold = true, fg = "#89ddff" },
+      ObsidianDeferred = { italic = true, fg = "#676e95" },
+      ObsidianBlockID = { italic = true, fg = "#89ddff" },
+      ObsidianHighlightText = { bg = "#75662e" },
+    },
+  }
+end
+
+---@class obsidian.config.AttachmentsOpts
+---
+---@field img_folder string Default folder to save images to, relative to the vault root.
+---@field img_name_func (fun(): string)|?
+---@field img_text_func fun(client: obsidian.Client, path: obsidian.Path): string
+---@field confirm_img_paste boolean Whether to confirm the paste or not. Defaults to true.
+config.AttachmentsOpts = {}
+
+---@return obsidian.config.AttachmentsOpts
+config.AttachmentsOpts.default = function()
+  return {
+    img_folder = "assets/imgs",
+    ---@param client obsidian.Client
+    ---@param path obsidian.Path the absolute path to the image file
+    ---@return string
+    img_text_func = function(client, path)
+      path = client:vault_relative_path(path) or path
+      return string.format("![%s](%s)", path.name, path)
+    end,
+    confirm_img_paste = true,
+  }
+end
+
+---@class obsidian.config.CallbackConfig
+---
+---@field post_setup fun(client: obsidian.Client)|? Runs right after the `obsidian.Client` is initialized.
+---@field enter_note fun(client: obsidian.Client, note: obsidian.Note)|? Runs when entering a note buffer.
+---@field leave_note fun(client: obsidian.Client, note: obsidian.Note)|? Runs when leaving a note buffer.
+---@field pre_write_note fun(client: obsidian.Client, note: obsidian.Note)|? Runs right before writing a note buffer.
+---@field post_set_workspace fun(client: obsidian.Client, workspace: obsidian.Workspace)|? Runs anytime the workspace is set/changed.
+config.CallbackConfig = {}
+
+---@return obsidian.config.CallbackConfig
+config.CallbackConfig.default = function()
+  return {}
+end
+
+---@class obsidian.config.SRSOpts
+---
+---@field enabled boolean Whether to enable SRS commands.
+---@field max_new_per_day integer Maximum number of new cards to review per day.
+---@field max_reviews_per_day integer Maximum number of total reviews per day.
+---@field default_ease number Default ease factor (e.g. 2.5).
+---@field min_ease number Minimum ease factor (e.g. 1.3).
+---@field easy_bonus number Multiplier for "easy" responses (e.g. 1.3).
+---@field hard_interval number Multiplier for "hard" responses (e.g. 1.2).
+config.SRSOpts = {}
+
+---@return obsidian.config.SRSOpts
+config.SRSOpts.default = function()
+  return {
+    enabled = true,
+    max_new_per_day = 20,
+    max_reviews_per_day = 100,
+    default_ease = 2.5,
+    min_ease = 1.3,
+    easy_bonus = 1.3,
+    hard_interval = 1.2,
+  }
+end
+
+---@class obsidian.config.TasksOpts
+---
+---@field enabled boolean Whether to enable task management commands.
+---@field auto_pause_on_exit boolean Auto-pause active tasks when quitting Neovim.
+---@field stale_threshold_days integer Days before a project is flagged as "starving".
+---@field daily_stats_placeholder string The placeholder comment to use for auto-updating stats.
+config.TasksOpts = {}
+
+---@return obsidian.config.TasksOpts
+config.TasksOpts.default = function()
+  return {
+    enabled = true,
+    auto_pause_on_exit = true,
+    stale_threshold_days = 3,
+    daily_stats_placeholder = "<!-- obsidian-task-stats -->",
+  }
+end
+
+return config
