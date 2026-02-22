@@ -6,8 +6,6 @@ local command_lookups = {
   ObsidianOpen = "obsidian.commands.open",
   ObsidianTemplate = "obsidian.commands.template",
   ObsidianNewFromTemplate = "obsidian.commands.new_from_template",
-  ObsidianFollowLink = "obsidian.commands.follow_link",
-  ObsidianToggleCheckbox = "obsidian.commands.toggle_checkbox",
   ObsidianWorkspace = "obsidian.commands.workspace",
   ObsidianPasteImg = "obsidian.commands.paste_img",
   ObsidianDebug = "obsidian.commands.debug",
@@ -78,8 +76,6 @@ M.register("ObsidianNew", { opts = { nargs = "?", complete = "file", desc = "Cre
 M.register("ObsidianOpen", { opts = { nargs = "?", complete = "file", desc = "Open in Obsidian" } })
 M.register("ObsidianTemplate", { opts = { nargs = "?", desc = "Insert a template" } })
 M.register("ObsidianNewFromTemplate", { opts = { nargs = "?", desc = "Create a new note from a template" } })
-M.register("ObsidianFollowLink", { opts = { nargs = "?", desc = "Follow link" } })
-M.register("ObsidianToggleCheckbox", { opts = { nargs = 0, desc = "Toggle checkbox" } })
 M.register("ObsidianWorkspace", { opts = { nargs = "?", desc = "Change workspace" } })
 M.register("ObsidianPasteImg", { opts = { nargs = "?", desc = "Paste an image" } })
 M.register("ObsidianDebug", { opts = { nargs = 0, desc = "Log some information for debugging" } })

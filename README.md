@@ -87,16 +87,11 @@ return {
 
 To get the full Obsidian experience (linking, backlinks, rename, autocomplete), you **must** configure `markdown-oxide`.
 
-Add this to your LSP configuration:
-```lua
-require('lspconfig').markdown_oxide.setup({
-  capabilities = capabilities, -- Your standard capabilities
-  on_attach = on_attach,       -- Your standard on_attach
-  root_dir = require('lspconfig.util').root_pattern('.obsidian', 'obsidian.json', '.git'),
-})
-```
+For a complete, copy-pasteable configuration including smart link following and daily note commands, see [**`markdown-oxide-lsp-example.lua`**](./markdown-oxide-lsp-example.lua).
 
 ---
 
 ## 📖 Complete Documentation
-For recommended keybindings and a full list of settings, see [**`lazy-obsidian-example.lua`**](./lazy-obsidian-example.lua).
+For recommended keybindings and a full list of settings, see:
+- [**`lazy-obsidian-example.lua`**](./lazy-obsidian-example.lua) (Plugin Config)
+- [**`markdown-oxide-lsp-example.lua`**](./markdown-oxide-lsp-example.lua) (LSP Config)

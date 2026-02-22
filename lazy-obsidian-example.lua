@@ -285,10 +285,8 @@ return {
       { desc = "Paste image" })
     vim.keymap.set("n", "<leader>oo", "<cmd>ObsidianOpen<cr>",
       { desc = "Open in Obsidian app" })
-    vim.keymap.set("n", "<leader>og", "<cmd>ObsidianFollowLink<cr>",
-      { desc = "Follow link" })
-    vim.keymap.set("n", "<leader>oc", "<cmd>ObsidianToggleCheckbox<cr>",
-      { desc = "Toggle checkbox" })
+    -- Note navigation is handled by markdown-oxide LSP (gf, <CR>).
+    -- See markdown-oxide-lsp-example.lua for recommended LSP setup.
 
     -- Task Management Commands
     vim.keymap.set("n", "<leader>ott", "<cmd>ObsidianTaskToggle<cr>",

@@ -214,12 +214,13 @@ config.MappingOpts = {}
 ---Get defaults.
 ---@return obsidian.config.MappingOpts
 config.MappingOpts.default = function()
-  local mappings = require "obsidian.mappings"
-
   return {
-    ["gf"] = mappings.gf_passthrough(),
-    ["<leader>ch"] = mappings.toggle_checkbox(),
-    ["<cr>"] = mappings.smart_action(),
+    ["<leader>ch"] = {
+      action = function()
+        return require("obsidian").get_client():command "ObsidianTaskToggle"
+      end,
+      opts = { desc = "Toggle task state" },
+    },
   }
 end
 

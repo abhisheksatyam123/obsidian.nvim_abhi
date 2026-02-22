@@ -1151,39 +1151,4 @@ util.toggle_checkbox = function(checkboxes)
   vim.api.nvim_buf_set_lines(0, lnum, lnum + 1, false, { new_line })
 end
 
---- Smart action: if on a link, follow it; if on a checkbox, toggle it.
---- Used as a mapping action.
----@param checkboxes string[]|nil ordered checkbox chars
-util.smart_action = function(checkboxes)
-  local line = vim.api.nvim_get_current_line()
-
-  -- Check if cursor is on a link first.
-  local link_start = util.cursor_on_markdown_link(line, nil, true, true, true)
-  if link_start then
-    vim.cmd "ObsidianFollowLink"
-    return
-  end
-
-  -- Check if on a checkbox line.
-  if string.match(line, "^%s*%- %[.%]") then
-    if checkboxes then
-      util.toggle_checkbox(checkboxes)
-    else
-      util.toggle_checkbox { " ", "x" }
-    end
-    return
-  end
-end
-
---- gf passthrough: follow obsidian links or fall back to normal gf.
-util.gf_passthrough = function()
-  local line = vim.api.nvim_get_current_line()
-  local link_start = util.cursor_on_markdown_link(line, nil, false, true, false)
-  if link_start then
-    vim.cmd "ObsidianFollowLink"
-  else
-    vim.cmd "normal! gf"
-  end
-end
-
 return util
