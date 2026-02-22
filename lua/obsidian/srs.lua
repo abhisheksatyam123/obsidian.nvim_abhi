@@ -1,12 +1,4 @@
 --- Spaced Repetition System (SRS) module for obsidian.nvim
----
---- Card format (compatible with Obsidian Spaced Repetition community plugin):
----   Single-line basic:    Question::Answer
----   Single-line reversed: Question:::Answer
----   Scheduling data:      <!--SR:!2025-02-15,3,250-->
----
---- The SM-2 algorithm is used for scheduling.
-
 local Path = require "obsidian.path"
 local log = require "obsidian.log"
 local search = require "obsidian.search"
@@ -18,340 +10,198 @@ local M = {}
 ---@class obsidian.srs.Card
 ---@field question string
 ---@field answer string
----@field file_path string Absolute path to the file containing this card.
----@field line_num integer 1-indexed line number where the card starts.
----@field due_date string|? ISO date string "YYYY-MM-DD" or nil if new.
----@field interval integer Current interval in days (0 = new card).
----@field ease integer Ease factor * 100 (e.g. 250 = 2.50).
----@field is_new boolean True if the card has never been reviewed.
----@field is_reversed boolean True if this is a reversed card (answer shown first).
----@field raw_line string The raw line text from the file.
+---@field file_path string
+---@field line_num integer
+---@field due_date string|?
+---@field interval integer
+---@field ease integer
+---@field is_new boolean
+---@field is_reversed boolean
+---@field is_cloze boolean
+---@field cloze_num integer|?
+---@field raw_line string
+---@field is_block boolean|?
+---@field block_lines string[]|?
+---@field block_markers table[]|?
 
---- Default ease factor (2.5 * 100).
 M.DEFAULT_EASE = 250
-
---- Minimum ease factor (1.3 * 100).
 M.MIN_EASE = 130
-
---- Default initial interval (1 day).
 M.DEFAULT_INTERVAL = 1
 
---- Regex patterns for ripgrep.
--- Match basic separators (:: or :::) OR lines containing exactly ? or ??
-M.CARD_SEPARATOR_PATTERN = "(::[:]{0,1}[^>]|^\\s*\\?\\??\\s*$)"
+-- Patterns for ripgrep search
+M.CARD_SEPARATOR_PATTERN = "(::[:]?|^\\s*\\?\\??\\s*$)"
+M.CLOZE_PATTERN = "(\\{\\{[cfrpelsv]\\d+::|==)"
 
---- Pattern for finding cloze deletions `{{c1::text}}`, `**text**`, `==text==`
-M.CLOZE_PATTERN = "(\\{\\{c\\d+::|\\*\\*|==)"
-
---- Lua pattern to parse a single-line card: `Question :: Answer` or `Question ::: Answer`
----@param line string
----@return string|?, string|?, boolean is_reversed
-M.parse_card_line = function(line)
-  local q, a = string.match(line, "^(.-)%s*:::%s*(.+)$")
-  if q and a then
-    a = M.strip_schedule_comment(a)
-    return q, a, true
-  end
-
-  q, a = string.match(line, "^(.-)%s*::%s*(.+)$")
-  if q and a then
-    a = M.strip_schedule_comment(a)
-    return q, a, false
-  end
-
-  return nil, nil, false
-end
-
---- Parse a cloze deletion card
---- Format: Text {{c1::hidden}} more text, or **hidden**, ==hidden==
----@param line string
----@return string|?, string|?, integer|?
-M.parse_cloze_line = function(line)
-  local clozes = {}
-  
-  -- Match standard {{c1::text}}
-  for num, text in string.gmatch(line, "{{c(%d+)::([^}]+)}}") do
-    table.insert(clozes, { num = tonumber(num), text = text, pattern = "{{c" .. num .. "::" .. text .. "}}" })
-  end
-
-  -- Match implicit **text**
-  for text in string.gmatch(line, "%*%*([^%*]+)%*%*") do
-    table.insert(clozes, { num = 1, text = text, pattern = "%*%*" .. text .. "%*%*" })
-  end
-
-  -- Match implicit ==text==
-  for text in string.gmatch(line, "==([^=]+)==") do
-    table.insert(clozes, { num = 1, text = text, pattern = "==" .. text .. "==" })
-  end
-
-  if #clozes == 0 then
-    return nil
-  end
-
-  -- We need to carefully replace the patterns in the question
-  local question = line
-  local answers = {}
-
-  for _, cloze in ipairs(clozes) do
-    local target = ""
-    if cloze.pattern and type(cloze.pattern) == "string" and string.match(cloze.pattern, "^{{c") then
-      target = "{{c" .. cloze.num .. "::" .. cloze.text .. "}}"
-    elseif cloze.pattern == "%*%*" .. cloze.text .. "%*%*" then
-      target = "**" .. cloze.text .. "**"
-    elseif cloze.pattern == "==" .. cloze.text .. "==" then
-      target = "==" .. cloze.text .. "=="
-    end
-
-    if target ~= "" then
-      -- Use literal string replacement to completely sidestep Lua's magic character escaping issues in gsub
-      local start_idx, end_idx = string.find(question, target, 1, true)
-      if start_idx then
-        question = string.sub(question, 1, start_idx - 1) .. "[...]" .. string.sub(question, end_idx + 1)
-      end
-    end
-    table.insert(answers, cloze.text)
-  end
-
-  -- Fallback cleanup for remaining clozes if we missed any (like overlapping duplicate texts)
-  -- question = string.gsub(question, "{{c%d+::([^}]+)}}", "%1")
-  
-  -- Just clean any remaining standard clozes for safety
-  question = string.gsub(question, "{{c%d+::([^}]+)}}", "%1")
-
-  return question, table.concat(answers, ", "), clozes[1].num
-end
-
---- Extract tags from text
----@param text string
----@return string[]
-M.extract_tags = function(text)
-  local tags = {}
-  for tag in string.gmatch(text, "#([%w_/-]+)") do
-    table.insert(tags, tag)
-  end
-  return tags
-end
-
---- Strip the scheduling HTML comment from the end of a string.
----@param s string
----@return string
 M.strip_schedule_comment = function(s)
-  local stripped = string.gsub(s, "%s*<!%-%-SR:!?[^%-]-%-%->{0,1}%s*$", "")
+  local stripped = string.gsub(s, "%s*<!%-%-SR:!?[^%-]%-%->{0,1}%s*$", "")
   stripped = string.gsub(stripped, "%s*<!%-%-SR:[^>]*%-%->%s*$", "")
   return stripped
 end
 
---- Parse the scheduling comment from a line.
---- Format: <!--SR:!2025-02-15,3,250-->
----@param line string
----@return string|? due_date, integer|? interval, integer|? ease
-M.parse_schedule_comment = function(line)
-  local date, interval, ease = string.match(line, "<!%-%-SR:!([%d%-]+),(%d+),(%d+)%-%->")
-  if date then
-    return date, tonumber(interval), tonumber(ease)
+M.parse_card_line = function(line)
+  local q, a = string.match(line, "^(.-)%s*:::%s*(.+)$")
+  if q and a then return q, M.strip_schedule_comment(a), true end
+  q, a = string.match(line, "^(.-)%s*::%s*(.+)$")
+  if q and a then return q, M.strip_schedule_comment(a), false end
+  return nil, nil, false
+end
+
+--- Compatibility wrapper for old cloze parsing
+M.parse_cloze_line = function(line)
+  -- Try implicit highlight first
+  local q, a, rest = string.match(line, "^(.-)==([^=]+)==(.-)$")
+  if q and a then
+    return q .. "[...]" .. rest, a, 1
+  end
+  -- Try implicit bold
+  q, a, rest = string.match(line, "^(.-)%*%*([^%*]+)%*%*(.-)$")
+  if q and a then
+    return q .. "[...]" .. rest, a, 1
+  end
+  -- Try standard cloze
+  local type, num, text
+  q, type, num, text, rest = string.match(line, "^(.-){{([cfrpelsv])(%d+)::([^}]+)}}(.-)$")
+  if q and text then
+    return q .. "[...]" .. rest, text, tonumber(num)
   end
   return nil, nil, nil
 end
 
---- Build a scheduling comment string.
----@param due_date string ISO date "YYYY-MM-DD"
----@param interval integer
----@param ease integer
----@return string
+--- Create a card object from a line (for testing and manual parsing)
+M.card_from_line = function(line, path, line_num, all_lines)
+  if line == "?" or line == "??" then
+    if not all_lines then return nil end
+    local is_reversed = line == "??"
+    local q_lines, a_lines = {}, {}
+    for i = line_num - 1, 1, -1 do
+      if string.match(all_lines[i] or "", "^%s*$") then break end
+      table.insert(q_lines, 1, all_lines[i])
+    end
+    local due_date, interval, ease, answer_end_line
+    for i = line_num + 1, #all_lines do
+      if string.match(all_lines[i] or "", "^%s*$") then break end
+      answer_end_line = i
+      local l = all_lines[i]
+      if string.match(l, "<!%-%-SR:[^>]*%-%->") then
+        due_date, interval, ease = M.parse_schedule_comment(l)
+        l = M.strip_schedule_comment(l)
+      end
+      table.insert(a_lines, l)
+    end
+    local q, a = table.concat(q_lines, "\n"):match("^%s*(.-)%s*$"), table.concat(a_lines, "\n"):match("^%s*(.-)%s*$")
+    if q and a then
+      return { question = q, answer = a, file_path = path, line_num = line_num, answer_end_line = answer_end_line,
+               due_date = due_date, interval = interval or 0, ease = ease or M.DEFAULT_EASE, 
+               is_new = not due_date, is_reversed = is_reversed, is_cloze = false, layout_type = "classic" }
+    end
+  else
+    local q, a, is_reversed = M.parse_card_line(line)
+    if q and a then
+      local due_date, interval, ease = M.parse_schedule_comment(line)
+      return { question = q, answer = a, file_path = path, line_num = line_num,
+               due_date = due_date, interval = interval or 0, ease = ease or M.DEFAULT_EASE, 
+               is_new = not due_date, is_reversed = is_reversed, is_cloze = false, layout_type = "classic" }
+    end
+  end
+  return nil
+end
+
+--- Extract all markers from a line
+M.extract_markers = function(line)
+  local markers = {}
+  -- Standard: {{f1::text}}
+  for type, num, text in string.gmatch(line, "{{([cfrpelsv])(%d+)::([^}]+)}}") do
+    table.insert(markers, { type = type, num = tonumber(num), text = text, raw = "{{" .. type .. num .. "::" .. text .. "}}" })
+  end
+  -- Implicit Highlight (c1)
+  for text in string.gmatch(line, "==([^=]+)==") do
+    table.insert(markers, { type = "c", num = 1, text = text, raw = "==" .. text .. "==" })
+  end
+  return markers
+end
+
+M.parse_system_line = function(line, target_id)
+  local util = require "obsidian.util"
+  local markers = M.extract_markers(line)
+  if #markers == 0 then return nil end
+
+  local question = line
+  local answers = {}
+  for _, m in ipairs(markers) do
+    local id = m.type .. m.num
+    local pattern = util.escape_magic_characters(m.raw)
+    if id == target_id then
+      question = string.gsub(question, pattern, "[...]")
+      table.insert(answers, m.text)
+    else
+      question = string.gsub(question, pattern, m.text)
+    end
+  end
+  return M.strip_schedule_comment(question), table.concat(answers, ", ")
+end
+
+M.parse_schedule_comment = function(line)
+  local date, interval, ease = string.match(line, "<!%-%-SR:!([%d%-]+),(%d+),(%d+)%-%->")
+  return date, tonumber(interval), tonumber(ease)
+end
+
 M.build_schedule_comment = function(due_date, interval, ease)
   return string.format("<!--SR:!%s,%d,%d-->", due_date, interval, ease)
 end
 
---- SM-2 algorithm implementation.
----
---- Grade scale (0-5):
----   0 = Complete blackout
----   1 = Incorrect; correct answer remembered upon seeing it
----   2 = Incorrect; correct answer seemed easy to recall
----   3 = Correct with serious difficulty
----   4 = Correct with some hesitation
----   5 = Perfect response
----
---- For simplicity, we map to 4 buttons:
----   "again"  = grade 1 (reset)
----   "hard"   = grade 3
----   "good"   = grade 4
----   "easy"   = grade 5
----
----@param grade integer SM-2 grade (0-5)
----@param interval integer Current interval in days
----@param ease integer Current ease factor * 100 (e.g. 250 = 2.5)
----@return integer new_interval, integer new_ease
 M.sm2 = function(grade, interval, ease)
-  local new_ease = ease
-  local new_interval = interval
-
-  if grade < 3 then
-    new_interval = 1
-    new_ease = math.max(M.MIN_EASE, ease - 20)
-  else
-    if interval == 0 then
-      new_interval = 1
-    elseif interval == 1 then
-      new_interval = 6
-    else
-      new_interval = math.ceil(interval * (ease / 100))
-    end
-
-    -- SM-2 ease adjustment: EF' = EF + (0.1 - (5-q) * (0.08 + (5-q) * 0.02))
-    local delta = math.floor((0.1 - (5 - grade) * (0.08 + (5 - grade) * 0.02)) * 100)
-    new_ease = math.max(M.MIN_EASE, ease + delta)
-  end
-
-  return new_interval, new_ease
+  if grade < 3 then return 1, math.max(M.MIN_EASE, ease - 20) end
+  local new_interval = interval == 0 and 1 or (interval == 1 and 6 or math.ceil(interval * (ease / 100)))
+  local delta = math.floor((0.1 - (5 - grade) * (0.08 + (5 - grade) * 0.02)) * 100)
+  return new_interval, math.max(M.MIN_EASE, ease + delta)
 end
 
---- Map a button name to an SM-2 grade.
----@param button string "again"|"hard"|"good"|"easy"
----@return integer
 M.button_to_grade = function(button)
-  local grades = {
-    again = 1,
-    hard = 3,
-    good = 4,
-    easy = 5,
-  }
+  local grades = { again = 1, hard = 3, good = 4, easy = 5 }
   return grades[button] or 4
 end
 
---- Compute the next due date from today + interval days.
----@param interval integer Days from now.
----@return string ISO date "YYYY-MM-DD"
 M.next_due_date = function(interval)
-  local time = os.time() + (interval * 86400)
-  return os.date("%Y-%m-%d", time)
+  return os.date("%Y-%m-%d", os.time() + (interval * 86400))
 end
 
---- Get today's date as ISO string.
----@return string
-M.today = function()
-  return os.date("%Y-%m-%d", os.time())
+M.today = function() return os.date("%Y-%m-%d", os.time()) end
+M.is_due = function(date) return not date or date <= M.today() end
+
+M.days_until_due = function(date)
+  if not date then return 0 end
+  local today = M.today()
+  if date <= today then return 0 end
+  
+  local y1, m1, d1 = string.match(today, "(%d+)-(%d+)-(%d+)")
+  local y2, m2, d2 = string.match(date, "(%d+)-(%d+)-(%d+)")
+  
+  local t1 = os.time({year = tonumber(y1), month = tonumber(m1), day = tonumber(d1), hour = 12})
+  local t2 = os.time({year = tonumber(y2), month = tonumber(m2), day = tonumber(d2), hour = 12})
+  
+  return math.floor(os.difftime(t2, t1) / 86400)
 end
 
---- Check if a card is due (due_date <= today).
----@param due_date string|? ISO date or nil (new cards are always due).
----@return boolean
-M.is_due = function(due_date)
-  if due_date == nil then
-    return true
-  end
-  return due_date <= M.today()
-end
-
---- Calculate days until a card is due.
----@param due_date string|? ISO date or nil.
----@return integer
-M.days_until_due = function(due_date)
-  if due_date == nil then
-    return 0
+M.get_heading_trace = function(lines, line_num)
+  local trace = {}
+  local current_level = 7 -- Higher than any possible Markdown header
+  
+  for i = line_num - 1, 1, -1 do
+    local line = lines[i] or ""
+    local hashes, header_text = string.match(line, "^(#+)%s+(.*)$")
+    if hashes then
+      local level = #hashes
+      if level < current_level then
+        -- Clean up header text (remove trailing schedule comments or tags if needed, but let's keep it simple first)
+        local clean_text = M.strip_schedule_comment(header_text):gsub("%s*$", "")
+        table.insert(trace, 1, clean_text)
+        current_level = level
+      end
+    end
+    if current_level == 1 then break end
   end
   
-  local today_time = os.time()
-  local due_time = os.time({
-    year = tonumber(due_date:sub(1, 4)),
-    month = tonumber(due_date:sub(6, 7)),
-    day = tonumber(due_date:sub(9, 10)),
-  })
-  
-  local diff_days = math.floor(os.difftime(due_time, today_time) / 86400)
-  return diff_days
-end
-
----@field is_cloze boolean
----@field cloze_num integer|?
----@field raw_line string|?
----@field answer_end_line integer|? The line number in the file where the schedule comment for a multi-line card should be edited (only present on multi-line)
-
---- Parse a card from a raw text line.
---- Note: For multi-line cards (? or ??), `line` contains the whole file contents so we can extract lines!
----@param line string
----@param path string
----@param line_num integer
----@param lines string[]|?
----@return obsidian.srs.Card|?
-M.card_from_line = function(line, path, line_num, lines)
-  local due_date, interval, ease, q, a, is_reversed
-  local answer_end_line = nil
-
-  -- Check if it's a multi-line card (? or ??)
-  if string.match(line, "^%s*%?%??%s*$") and lines and #lines > 0 then
-    is_reversed = string.match(line, "%?%?") ~= nil
-    
-    local q_lines = {}
-    -- Traverse backwards until an empty line
-    for i = line_num - 1, 1, -1 do
-      local check_line = lines[i] or ""
-      if string.match(check_line, "^%s*$") then
-        break
-      end
-      table.insert(q_lines, 1, check_line)
-    end
-    q = table.concat(q_lines, "\n")
-
-    local a_lines = {}
-    local schedule_line = nil
-    answer_end_line = line_num + 1
-
-    -- Traverse forwards until an empty line
-    for i = line_num + 1, #lines do
-      local check_line = lines[i] or ""
-      if string.match(check_line, "^%s*$") then
-        -- Blank line ends the card
-        break
-      end
-      
-      answer_end_line = i
-      
-      -- If there's a schedule comment on this line, save it and optionally strip it from the display answer
-      if string.match(check_line, "<!%-%-SR:[^>]*%-%->") then
-        schedule_line = check_line
-        check_line = M.strip_schedule_comment(check_line)
-      end
-      
-      table.insert(a_lines, check_line)
-    end
-    a = table.concat(a_lines, "\n")
-
-    if schedule_line then
-      due_date, interval, ease = M.parse_schedule_comment(schedule_line)
-    end
-    
-    -- Strip trailing/leading spaces on multi-line extraction
-    q = q:match("^%s*(.-)%s*$")
-    a = a:match("^%s*(.-)%s*$")
-    
-    if string.len(q) == 0 or string.len(a) == 0 then
-      return nil
-    end
-
-  else
-    -- Single line fallback
-    q, a, is_reversed = M.parse_card_line(line)
-    if not q or not a then
-      return nil
-    end
-
-    due_date, interval, ease = M.parse_schedule_comment(line)
-  end
-
-  return {
-    question = q,
-    answer = a,
-    file_path = path,
-    line_num = line_num,
-    answer_end_line = answer_end_line,
-    due_date = due_date,
-    interval = interval or 0,
-    ease = ease or M.DEFAULT_EASE,
-    is_new = (due_date == nil),
-    is_reversed = is_reversed or false,
-    is_cloze = false,
-  }
+  return #trace > 0 and table.concat(trace, " > ") or nil
 end
 
 --- Check if a file has unsaved changes in any open buffer.
@@ -424,174 +274,323 @@ M.review_card = function(card, button)
   card.interval = new_interval
   card.ease = new_ease
   card.is_new = false
-  card.raw_line = new_line
 
   log.info("Reviewed card: next due %s (interval=%d, ease=%d)", new_due, new_interval, new_ease)
   return true
 end
 
---- Find all flashcards across the vault using ripgrep.
---- This uses the same pattern as `client:find_tags_async()`.
----
----@param dir string|obsidian.Path The vault root directory.
----@param callback fun(cards: obsidian.srs.Card[])
----@param opts { due_only: boolean|? }|?
 M.find_cards_async = function(dir, callback, opts)
   opts = opts or {}
-
-  ---@type obsidian.srs.Card[]
   local cards = {}
-
   local tx, rx = channel.oneshot()
-
-  -- Simple cache to avoid reading file content multiple times per file
   local file_cache = {}
+  local note_cache = {}
 
-  ---@param match_data MatchData
-  local on_match = function(match_data)
-    local path = Path.new(match_data.path.text):resolve({ strict = true })
-    local path_str = tostring(path)
-    local line = match_data.lines.text
-    line = string.gsub(line, "\n$", "")
+  local Note = require "obsidian.note"
 
-    if not file_cache[path_str] then
-      local f = io.open(path_str, "r")
+  search.search_async(dir, M.CARD_SEPARATOR_PATTERN, nil, function(match)
+    local path = tostring(Path.new(match.path.text):resolve())
+    
+    -- Parse note once per file to check tags
+    if not note_cache[path] then
+      note_cache[path] = Note.from_file(path, { max_lines = 100 })
+    end
+    local note = note_cache[path]
+
+    -- Tag filter check (from frontmatter)
+    if opts.tag then
+      local has_tag = false
+      for _, t in ipairs(note.tags) do
+        -- Normalize tag (remove leading #)
+        local normalized_t = t:gsub("^#", "")
+        local normalized_filter = opts.tag:gsub("^#", "")
+        if normalized_t == normalized_filter then
+          has_tag = true
+          break
+        end
+      end
+      if not has_tag then return end
+    end
+
+    if not file_cache[path] then
+      local f = io.open(path, "r")
       if f then
-        local lines = {}
-        for l in f:lines() do
-          lines[#lines + 1] = l
-        end
+        file_cache[path] = {}
+        for l in f:lines() do table.insert(file_cache[path], l) end
         f:close()
-        file_cache[path_str] = lines
       end
     end
-
-    local card = M.card_from_line(line, path_str, match_data.line_number, file_cache[path_str])
-    if card then
-      if opts.due_only then
-        if M.is_due(card.due_date) then
-          cards[#cards + 1] = card
+    
+    local line_num = match.line_number
+    local lines = file_cache[path]
+    local line = lines[line_num]
+    
+    -- Find header trace for context
+    local section = M.get_heading_trace(lines, line_num)
+    
+    local due_date, interval, ease, q, a, is_reversed, answer_end_line
+    if string.match(line, "^%s*%?%??%s*$") then
+      is_reversed = string.match(line, "%?%?") ~= nil
+      local q_lines, a_lines = {}, {}
+      for i = line_num - 1, 1, -1 do
+        if string.match(lines[i] or "", "^%s*$") then break end
+        table.insert(q_lines, 1, lines[i])
+      end
+      for i = line_num + 1, #lines do
+        if string.match(lines[i] or "", "^%s*$") then break end
+        answer_end_line = i
+        local l = lines[i]
+        if string.match(l, "<!%-%-SR:[^>]*%-%->") then
+          due_date, interval, ease = M.parse_schedule_comment(l)
+          l = M.strip_schedule_comment(l)
         end
-      else
-        cards[#cards + 1] = card
+        table.insert(a_lines, l)
+      end
+      q, a = table.concat(q_lines, "\n"):match("^%s*(.-)%s*$"), table.concat(a_lines, "\n"):match("^%s*(.-)%s*$")
+      if q and a and q ~= "" and a ~= "" then
+        table.insert(cards, { question = q, answer = a, file_path = path, line_num = line_num, answer_end_line = answer_end_line,
+                             due_date = due_date, interval = interval or 0, ease = ease or M.DEFAULT_EASE, 
+                             is_new = not due_date, is_reversed = is_reversed, is_cloze = false, layout_type = "classic",
+                             section = section })
+      end
+    else
+      q, a, is_reversed = M.parse_card_line(line)
+      if q and a then
+        due_date, interval, ease = M.parse_schedule_comment(line)
+        table.insert(cards, { question = q, answer = a, file_path = path, line_num = line_num,
+                             due_date = due_date, interval = interval or 0, ease = ease or M.DEFAULT_EASE, 
+                             is_new = not due_date, is_reversed = is_reversed, is_cloze = false, layout_type = "classic",
+                             section = section })
       end
     end
-  end
+  end, function() tx() end)
 
-  search.search_async(dir, M.CARD_SEPARATOR_PATTERN, nil, on_match, function(_)
-    tx()
-  end)
-
-  async.run(function()
-    rx()
-    return cards
-  end, callback)
+  async.run(function() rx(); return cards end, callback)
 end
 
---- Statistics file path
-M.get_stats_file = function()
-  local data_dir = vim.fn.stdpath("data") .. "/obsidian-srs"
-  vim.fn.mkdir(data_dir, "p")
-  return data_dir .. "/stats.json"
+M.find_system_blocks_async = function(dir, callback, opts)
+  opts = opts or {}
+  local cards = {}
+  local tx, rx = channel.oneshot()
+  local file_cache = {}
+  local note_cache = {}
+
+  local Note = require "obsidian.note"
+
+  search.search_async(dir, M.CLOZE_PATTERN, nil, function(match)
+    local path = tostring(Path.new(match.path.text):resolve())
+    
+    -- Parse note once per file to check tags
+    if not note_cache[path] then
+      note_cache[path] = Note.from_file(path, { max_lines = 100 })
+    end
+    local note = note_cache[path]
+
+    -- Tag filter check (from frontmatter)
+    if opts.tag then
+      local has_tag = false
+      for _, t in ipairs(note.tags) do
+        -- Normalize tag (remove leading #)
+        local normalized_t = t:gsub("^#", "")
+        local normalized_filter = opts.tag:gsub("^#", "")
+        if normalized_t == normalized_filter then
+          has_tag = true
+          break
+        end
+      end
+      if not has_tag then return end
+    end
+
+    if not file_cache[path] then
+      local f = io.open(path, "r")
+      if f then
+        file_cache[path] = {}
+        for l in f:lines() do table.insert(file_cache[path], l) end
+        f:close()
+      end
+    end
+
+    local lines = file_cache[path]
+    local start_ln = match.line_number
+    
+    -- Find header trace for context
+    local section = M.get_heading_trace(lines, start_ln)
+    
+    -- Find block boundaries (contiguous text)
+    local b_start = start_ln
+    while b_start > 1 and not string.match(lines[b_start - 1] or "", "^%s*$") do
+      b_start = b_start - 1
+    end
+    
+    local b_end = start_ln
+    local schedule_line = nil
+    while b_end < #lines and not string.match(lines[b_end + 1] or "", "^%s*$") do
+      b_end = b_end + 1
+      if string.match(lines[b_end], "<!%-%-SR:[^>]*%-%->") then
+        schedule_line = lines[b_end]
+      end
+    end
+    if not schedule_line and string.match(lines[start_ln], "<!%-%-SR:[^>]*%-%->") then
+      schedule_line = lines[start_ln]
+    end
+
+    local block_key = path .. ":" .. b_start .. ":" .. b_end
+    if file_cache[block_key] then return end -- Avoid duplicates for same block
+    file_cache[block_key] = true
+
+    local block_lines = {}
+    local block_markers = {}
+    for i = b_start, b_end do
+      local l = lines[i]
+      table.insert(block_lines, M.strip_schedule_comment(l))
+      local ms = M.extract_markers(l)
+      for _, m in ipairs(ms) do
+        m.line_idx = i - b_start + 1
+        table.insert(block_markers, m)
+      end
+    end
+
+    if #block_markers > 0 then
+      local d, i, e = nil, nil, nil
+      if schedule_line then d, i, e = M.parse_schedule_comment(schedule_line) end
+      
+      local layout_type = "system"
+      if #block_lines == 1 and #block_markers == 1 then
+        layout_type = "classic"
+      end
+
+      table.insert(cards, {
+        file_path = path,
+        line_num = b_end,
+        due_date = d,
+        interval = i or 0,
+        ease = e or M.DEFAULT_EASE,
+        is_new = not d,
+        is_cloze = true,
+        is_block = true,
+        block_lines = block_lines,
+        block_markers = block_markers,
+        layout_type = layout_type,
+        section = section,
+      })
+    end
+  end, function() tx() end)
+
+  async.run(function() rx(); return cards end, callback)
 end
 
---- Load review statistics
+--- Compatibility wrapper for old cloze search
+M.find_cloze_cards_async = function(dir, callback, opts)
+  local util = require "obsidian.util"
+  M.find_system_blocks_async(dir, function(blocks)
+    local legacy_cards = {}
+    for _, b in ipairs(blocks) do
+      -- The old test expects one card per marker if they are on the same line,
+      -- or at least it expects the legacy format.
+      for _, m in ipairs(b.block_markers or {}) do
+        -- Find the line containing this marker
+        local line = b.block_lines[m.line_idx]
+        if line then
+          local question = line:gsub(util.escape_magic_characters(m.raw), "[...]")
+          -- Strip other markers from the question for simple display
+          for _, other_m in ipairs(b.block_markers) do
+            if other_m.raw ~= m.raw then
+              question = question:gsub(util.escape_magic_characters(other_m.raw), other_m.text)
+            end
+          end
+          
+          table.insert(legacy_cards, {
+            question = question,
+            answer = m.text,
+            cloze_num = m.num,
+            file_path = b.file_path,
+            line_num = b.line_num,
+            due_date = b.due_date,
+            interval = b.interval,
+            ease = b.ease,
+            is_new = b.is_new,
+            is_cloze = true,
+            section = b.section
+          })
+        end
+      end
+    end
+    callback(legacy_cards)
+  end, opts)
+end
+
 M.load_stats = function()
-  local stats_file = M.get_stats_file()
-  local f = io.open(stats_file, "r")
-  if not f then
-    return {
-      total_reviews = 0,
-      total_cards_created = 0,
-      daily_stats = {},
-      streak = 0,
-      last_review_date = nil,
-    }
-  end
-
+  local f = io.open(M.get_stats_file(), "r")
+  if not f then return { total_reviews = 0, daily_stats = {}, streak = 0 } end
   local content = f:read("*all")
   f:close()
-
-  local ok, stats = pcall(vim.json.decode, content)
-  if not ok or not stats then
-    return {
-      total_reviews = 0,
-      total_cards_created = 0,
-      daily_stats = {},
-      streak = 0,
-      last_review_date = nil,
-    }
-  end
-
-  return stats
+  if content == "" then return { total_reviews = 0, daily_stats = {}, streak = 0 } end
+  local ok, s = pcall(vim.json.decode, content)
+  return ok and s or { total_reviews = 0, daily_stats = {}, streak = 0 }
 end
 
---- Save review statistics
-M.save_stats = function(stats)
-  local stats_file = M.get_stats_file()
-  local f = io.open(stats_file, "w")
-  if not f then
-    log.err("Failed to save SRS stats")
-    return
-  end
-
-  f:write(vim.json.encode(stats))
-  f:close()
+M.save_stats = function(s)
+  local f = io.open(M.get_stats_file(), "w")
+  if f then f:write(vim.json.encode(s)); f:close() end
 end
 
---- Update statistics after a review
-M.update_stats = function(cards_reviewed, new_cards_reviewed)
-  local stats = M.load_stats()
-  local today = M.today()
-
-  if not stats.daily_stats[today] then
-    stats.daily_stats[today] = {
-      reviews = 0,
-      new_cards = 0,
-    }
-  end
-
-  stats.daily_stats[today].reviews = stats.daily_stats[today].reviews + cards_reviewed
-  stats.daily_stats[today].new_cards = stats.daily_stats[today].new_cards + (new_cards_reviewed or 0)
-  stats.total_reviews = stats.total_reviews + cards_reviewed
-
-  if stats.last_review_date then
-    local last_time = os.time({
-      year = tonumber(stats.last_review_date:sub(1, 4)),
-      month = tonumber(stats.last_review_date:sub(6, 7)),
-      day = tonumber(stats.last_review_date:sub(9, 10)),
-    })
-    local today_time = os.time()
-    local diff_days = os.difftime(today_time, last_time) / 86400
-
-    if diff_days >= 2 then
-      stats.streak = 1
-    elseif stats.last_review_date ~= today then
-      stats.streak = stats.streak + 1
-    end
-  else
-    stats.streak = 1
-  end
-
-  stats.last_review_date = today
-  M.save_stats(stats)
-
-  return stats
+M.update_stats = function(rev, new)
+  local s, t = M.load_stats(), M.today()
+  s.daily_stats = s.daily_stats or {}
+  s.daily_stats[t] = s.daily_stats[t] or { reviews = 0, new_cards = 0 }
+  s.daily_stats[t].reviews = s.daily_stats[t].reviews + rev
+  s.daily_stats[t].new_cards = s.daily_stats[t].new_cards + new
+  s.total_reviews = (s.total_reviews or 0) + rev
+  s.streak = (s.last_review_date == t) and s.streak or (s.last_review_date == os.date("%Y-%m-%d", os.time() - 86400) and s.streak + 1 or 1)
+  s.last_review_date = t
+  M.save_stats(s)
 end
 
---- Get review statistics summary
 M.get_stats_summary = function()
+  local s = M.load_stats()
+  local d = (s.daily_stats or {})[M.today()] or { reviews = 0, new_cards = 0 }
+  return { total_reviews = s.total_reviews or 0, today_reviews = d.reviews, today_new_cards = d.new_cards, streak = s.streak or 0 }
+end
+
+M.get_upcoming_reviews = function(cards, days)
+  local up = {}
+  for i = 0, days do up[os.date("%Y-%m-%d", os.time() + (i * 86400))] = 0 end
+  for _, c in ipairs(cards) do if c.due_date and up[c.due_date] then up[c.due_date] = up[c.due_date] + 1 end end
+  return up
+end
+
+--- Apply review limits from config
+M.apply_review_limits = function(cards, config)
+  config = config or {}
+  local max_new = config.max_new_per_day or 20
+  local max_total = config.max_reviews_per_day or 100
+
   local stats = M.load_stats()
   local today = M.today()
-  local today_stats = stats.daily_stats[today] or { reviews = 0, new_cards = 0 }
+  local today_stats = (stats.daily_stats or {})[today] or { reviews = 0, new_cards = 0 }
 
-  return {
-    total_reviews = stats.total_reviews,
-    today_reviews = today_stats.reviews,
-    today_new_cards = today_stats.new_cards,
-    streak = stats.streak,
-    last_review_date = stats.last_review_date,
-  }
+  local new_count = today_stats.new_cards or 0
+  local total_count = today_stats.reviews or 0
+
+  local filtered = {}
+  for _, card in ipairs(cards) do
+    if total_count >= max_total then
+      break
+    end
+
+    if card.is_new then
+      if new_count < max_new then
+        table.insert(filtered, card)
+        new_count = new_count + 1
+        total_count = total_count + 1
+      end
+    else
+      table.insert(filtered, card)
+      total_count = total_count + 1
+    end
+  end
+
+  return filtered
 end
 
 --- Filter cards by tags
@@ -607,7 +606,14 @@ M.filter_by_tags = function(cards, tags)
 
   local filtered = {}
   for _, card in ipairs(cards) do
-    local card_tags = M.extract_tags(card.question .. " " .. card.answer)
+    local content = ""
+    if card.is_block then
+      content = table.concat(card.block_lines, " ")
+    else
+      content = (card.question or "") .. " " .. (card.answer or "")
+    end
+
+    local card_tags = M.extract_tags(content)
     for _, card_tag in ipairs(card_tags) do
       if tag_set[card_tag] then
         table.insert(filtered, card)
@@ -619,109 +625,48 @@ M.filter_by_tags = function(cards, tags)
   return filtered
 end
 
---- Apply review limits from config
-M.apply_review_limits = function(cards, config)
-  config = config or {}
-  local max_new = config.max_new_per_day or 20
-  local max_total = config.max_reviews_per_day or 100
-
-  local stats = M.load_stats()
-  local today = M.today()
-  local today_stats = stats.daily_stats[today] or { reviews = 0, new_cards = 0 }
-
-  local new_count = today_stats.new_cards or 0
-  local total_count = today_stats.reviews or 0
-
-  local filtered = {}
-  for _, card in ipairs(cards) do
-    if total_count >= max_total then
-      break
-    end
-
-    if card.is_new then
-      if new_count >= max_new then
-        goto continue
-      end
-      new_count = new_count + 1
-    end
-
-    table.insert(filtered, card)
-    total_count = total_count + 1
-
-    ::continue::
-  end
-
-  return filtered
-end
-
---- Get upcoming reviews for the next N days
-M.get_upcoming_reviews = function(cards, days)
-  days = days or 7
-  local upcoming = {}
-
-  for i = 0, days do
-    local date = os.date("%Y-%m-%d", os.time() + (i * 86400))
-    upcoming[date] = 0
-  end
-
-  for _, card in ipairs(cards) do
-    if card.due_date and upcoming[card.due_date] then
-      upcoming[card.due_date] = upcoming[card.due_date] + 1
-    end
-  end
-
-  return upcoming
-end
-
---- Find cloze deletion cards
-M.find_cloze_cards_async = function(dir, callback, opts)
-  opts = opts or {}
-
-  local cards = {}
+--- Get all unique tags from note frontmatters in the vault.
+---@param dir string|obsidian.Path
+---@param callback fun(tags: string[])
+M.get_vault_tags_async = function(dir, callback)
+  local tags = {}
   local tx, rx = channel.oneshot()
+  local Note = require "obsidian.note"
+  local paths_seen = {}
 
-  local on_match = function(match_data)
-    local path = Path.new(match_data.path.text):resolve({ strict = true })
-    local line = match_data.lines.text
-    line = string.gsub(line, "\n$", "")
+  -- Use 'rg -l' to find files containing 'tags:' or 'tag:' efficiently.
+  -- Catch both indented and start-of-line keys.
+  local cmd = { "rg", "--no-config", "--type=md", "-l", "^\\s*tags?:", tostring(Path.new(dir):resolve()) }
+  require("obsidian.async").run_job_async(cmd[1], { unpack(cmd, 2) }, function(path)
+    path = path:match("^%s*(.-)%s*$")
+    if path == "" or paths_seen[path] then return end
+    paths_seen[path] = true
 
-    local cloze_q, cloze_a, cloze_num = M.parse_cloze_line(line)
-    if cloze_q and cloze_a then
-      local due_date, interval, ease = M.parse_schedule_comment(line)
-      local card = {
-        question = cloze_q,
-        answer = cloze_a,
-        file_path = tostring(path),
-        line_num = match_data.line_number,
-        due_date = due_date,
-        interval = interval or 0,
-        ease = ease or M.DEFAULT_EASE,
-        is_new = (due_date == nil),
-        is_reversed = false,
-        is_cloze = true,
-        cloze_num = cloze_num,
-        raw_line = line,
-        tags = M.extract_tags(line),
-      }
-
-      if opts.due_only then
-        if M.is_due(card.due_date) then
-          cards[#cards + 1] = card
+    local ok, note = pcall(Note.from_file, path, { max_lines = 50 })
+    if ok and note and note.tags then
+      for _, tag in ipairs(note.tags) do
+        local normalized = tag:gsub("^#", ""):match("^%s*(.-)%s*$")
+        if normalized ~= "" then
+          tags[normalized] = true
         end
-      else
-        cards[#cards + 1] = card
       end
     end
-  end
-
-  search.search_async(dir, M.CLOZE_PATTERN, nil, on_match, function(_)
+  end, function(_)
     tx()
   end)
 
   async.run(function()
     rx()
-    return cards
+    local keys = vim.tbl_keys(tags)
+    table.sort(keys)
+    return keys
   end, callback)
+end
+
+M.get_stats_file = function()
+  local d = vim.fn.stdpath("data") .. "/obsidian-srs"
+  vim.fn.mkdir(d, "p")
+  return d .. "/stats.json"
 end
 
 return M

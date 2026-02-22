@@ -382,6 +382,7 @@ end
 ---@class obsidian.config.SRSOpts
 ---
 ---@field enabled boolean Whether to enable SRS commands.
+---@field tag string|? Default tag to filter cards by (searches note frontmatter).
 ---@field max_new_per_day integer Maximum number of new cards to review per day.
 ---@field max_reviews_per_day integer Maximum number of total reviews per day.
 ---@field default_ease number Default ease factor (e.g. 2.5).
@@ -394,6 +395,7 @@ config.SRSOpts = {}
 config.SRSOpts.default = function()
   return {
     enabled = true,
+    tag = nil,
     max_new_per_day = 20,
     max_reviews_per_day = 100,
     default_ease = 2.5,
