@@ -1,6 +1,52 @@
 local log = require "obsidian.log"
 local srs = require "obsidian.srs"
 
+local function make_box_lines(title, content_lines, width)
+  local box_lines = {}
+  local content_width = width - 4
+  
+  local title_len = #title
+  local left_dashes = math.floor((content_width - title_len - 2) / 2)
+  local right_dashes = content_width - title_len - 2 - left_dashes
+  table.insert(box_lines, "  ╭" .. string.rep("─", left_dashes) .. " " .. title .. " " .. string.rep("─", right_dashes) .. "╮")
+  
+  for _, line in ipairs(content_lines) do
+    if #line <= content_width then
+      table.insert(box_lines, "  │ " .. line .. string.rep(" ", content_width - #line) .. " │")
+    else
+      local chunk = string.sub(line, 1, content_width)
+      table.insert(box_lines, "  │ " .. chunk .. " │")
+    end
+  end
+  
+  table.insert(box_lines, "  ╰" .. string.rep("─", content_width) .. "╯")
+  return box_lines
+end
+
+local function apply_stats_highlights(buf)
+  vim.api.nvim_buf_call(buf, function()
+    vim.cmd([[
+      syntax match SRSStatsTitle "📊.*"
+      highlight link SRSStatsTitle Title
+      
+      syntax match SRSStreak "🔥 Current Streak:.*"
+      highlight link SRSStreak Special
+      
+      syntax match SRSBarFilled "█"
+      highlight link SRSBarFilled DiagnosticOk
+      
+      syntax match SRSBarEmpty "░"
+      highlight link SRSBarEmpty Comment
+      
+      syntax match SRSForecastToday "→.*"
+      highlight link SRSForecastToday Function
+      
+      syntax match SRSBorderBox "[╭─╮│╰╯]"
+      highlight link SRSBorderBox FloatBorder
+    ]])
+  end)
+end
+
 ---@param client obsidian.Client
 return function(client, data)
   local stats = srs.get_stats_summary()
@@ -28,46 +74,51 @@ return function(client, data)
               return string.rep("█", filled) .. string.rep("░", width - filled)
             end
 
-            local title = tag and string.format("  # 📊 SRS Summary [#%s]", tag) or "  # 📊 Spaced Repetition Summary"
+            local box_width = 58
+            local title = tag and string.format("📊 SRS Summary [#%s]", tag) or "📊 Spaced Repetition Summary"
 
-            local lines = {
-              "",
-              title,
-              "",
-              "  " .. string.rep("━", 54),
-              "",
-              string.format("  **Total Cards:**     %d", total_cards),
-              string.format("  **Cards Due Today:** %d", #due_cards),
-              "  " .. make_bar(#due_cards, total_cards, 40),
-              "",
-              "  " .. string.rep("─", 54),
-              "",
-              "  ### 📈 Review Activity",
-              "",
-              string.format("  - Total Reviews:     %d", stats.total_reviews),
-              string.format("  - Reviews Today:     %d", stats.today_reviews),
-              string.format("  - New Cards Today:   %d", stats.today_new_cards),
-              string.format("  - 🔥 Streak:          **%d days**", stats.streak),
-              "",
-              "  " .. string.rep("─", 54),
-              "",
-              "  ### 📅 Upcoming Reviews (7 Day Forecast)",
-              "",
+            -- 1. Vault Status Box
+            local progress_bar = make_bar(#due_cards, total_cards, 20)
+            local status_content = {
+              string.format("Total Cards:     %d", total_cards),
+              string.format("Cards Due Today: %d", #due_cards),
+              string.format("Progress:        %s", progress_bar),
             }
+            local status_box = make_box_lines("Vault Status", status_content, box_width)
 
+            -- 2. Review Activity Box
+            local activity_content = {
+              string.format("📈 Total Reviews:   %d", stats.total_reviews),
+              string.format("⚡ Reviews Today:    %d", stats.today_reviews),
+              string.format("🆕 New Cards Today:  %d", stats.today_new_cards),
+              string.format("🔥 Current Streak:  %d days", stats.streak),
+            }
+            local activity_box = make_box_lines("Review Activity", activity_content, box_width)
+
+            -- 3. 7-Day Forecast Box
+            local forecast_content = {}
             for i = 0, 6 do
               local date_display = os.date("%a, %b %d", os.time() + (i * 86400))
               local iso_date = os.date("%Y-%m-%d", os.time() + (i * 86400))
               local count = upcoming[iso_date] or 0
-              local bar = make_bar(count, math.max(20, total_cards / 5), 15)
+              local bar = make_bar(count, math.max(20, total_cards / 5), 10)
               local marker = i == 0 and "→" or " "
-              table.insert(lines, string.format("  %s %-12s | %s (%d)", marker, date_display, bar, count))
+              table.insert(forecast_content, string.format("%s %-12s | %s (%d)", marker, date_display, bar, count))
             end
+            local forecast_box = make_box_lines("7-Day Forecast", forecast_content, box_width)
 
+            local lines = {
+              "",
+              "  " .. title,
+              "",
+            }
+            for _, l in ipairs(status_box) do table.insert(lines, l) end
             table.insert(lines, "")
-            table.insert(lines, "  " .. string.rep("━", 54))
+            for _, l in ipairs(activity_box) do table.insert(lines, l) end
             table.insert(lines, "")
-            table.insert(lines, "  *Press 'q' to close this dashboard*")
+            for _, l in ipairs(forecast_box) do table.insert(lines, l) end
+            table.insert(lines, "")
+            table.insert(lines, "  *Press 'q' or <Esc> to close this dashboard*")
             table.insert(lines, "")
 
             local buf = vim.api.nvim_create_buf(false, true)
@@ -94,6 +145,8 @@ return function(client, data)
             vim.api.nvim_buf_set_option(buf, "modifiable", false)
             vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
             vim.api.nvim_win_set_option(win, "conceallevel", 2)
+
+            apply_stats_highlights(buf)
 
             vim.keymap.set("n", "q", function()
               vim.api.nvim_win_close(win, true)

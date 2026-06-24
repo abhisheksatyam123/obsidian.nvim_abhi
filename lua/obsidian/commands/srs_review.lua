@@ -3,6 +3,59 @@ local srs = require "obsidian.srs"
 local Path = require "obsidian.path"
 local util = require "obsidian.util"
 
+local function make_box(title, text, width)
+  local box_lines = {}
+  local content_width = width - 4
+  
+  local title_len = #title
+  local left_dashes = math.floor((content_width - title_len - 2) / 2)
+  local right_dashes = content_width - title_len - 2 - left_dashes
+  table.insert(box_lines, "  ╭" .. string.rep("─", left_dashes) .. " " .. title .. " " .. string.rep("─", right_dashes) .. "╮")
+  
+  for _, line in ipairs(vim.split(text, "\n")) do
+    line = line:gsub("%s*$", "")
+    if #line <= content_width then
+      table.insert(box_lines, "  │ " .. line .. string.rep(" ", content_width - #line) .. " │")
+    else
+      local pos = 1
+      while pos <= #line do
+        local chunk = string.sub(line, pos, pos + content_width - 1)
+        table.insert(box_lines, "  │ " .. chunk .. string.rep(" ", content_width - #chunk) .. " │")
+        pos = pos + content_width
+      end
+    end
+  end
+  
+  table.insert(box_lines, "  ╰" .. string.rep("─", content_width) .. "╯")
+  return box_lines
+end
+
+local function apply_review_highlights(buf)
+  vim.api.nvim_buf_call(buf, function()
+    vim.cmd([[
+      syntax match SRSKeyAgain "🔴 \[1\] Again"
+      highlight link SRSKeyAgain DiagnosticError
+      syntax match SRSKeyHard "🟡 \[2\] Hard"
+      highlight link SRSKeyHard DiagnosticWarn
+      syntax match SRSKeyGood "🟢 \[3\] Good"
+      highlight link SRSKeyGood DiagnosticOk
+      syntax match SRSKeyEasy "🔵 \[4\] Easy"
+      highlight link SRSKeyEasy DiagnosticInfo
+      
+      syntax match SRSActionEdit "\[e\] Edit"
+      highlight link SRSActionEdit Special
+      syntax match SRSActionQuit "\[q\] Quit"
+      highlight link SRSActionQuit Comment
+      
+      syntax match SRSProgressHeader "Card \d\+ / \d\+"
+      highlight link SRSProgressHeader Type
+      
+      syntax match SRSBorderBox "[╭─╮│╰╯]"
+      highlight link SRSBorderBox FloatBorder
+    ]])
+  end)
+end
+
 return function(client, data)
   local all_cards = {}
   local filter_tag = data.args and data.args ~= "" and data.args or client.opts.srs.tag
@@ -49,8 +102,10 @@ return function(client, data)
               end
               local tag_header = tag and string.format(" [#%s]", tag:gsub("^#", "")) or ""
               table.insert(lines, string.format("  📂 %s%s  |  Card %d / %d", location, tag_header, card_idx, #due_cards))
-              table.insert(lines, "  " .. string.rep("━", 54))
+              table.insert(lines, "  " .. string.rep("━", 58))
               table.insert(lines, "")
+
+              local box_width = 58
 
               if card.layout_type == "classic" then
                 -- CLASSIC LAYOUT (Clean, simple Question/Answer)
@@ -79,21 +134,17 @@ return function(client, data)
                   end
                 end
 
-                table.insert(lines, "  **Question:**")
-                for _, l in ipairs(vim.split(question_text, "\n")) do
-                  table.insert(lines, "  " .. l)
+                for _, l in ipairs(make_box("Question", question_text, box_width)) do
+                  table.insert(lines, l)
                 end
                 table.insert(lines, "")
 
                 if reveal_state.finished then
-                  table.insert(lines, "  " .. string.rep("─", 54))
-                  table.insert(lines, "  **Answer:**")
-                  for _, l in ipairs(vim.split(answer_text, "\n")) do
-                    table.insert(lines, "  " .. l)
+                  for _, l in ipairs(make_box("Answer", answer_text, box_width)) do
+                    table.insert(lines, l)
                   end
                 else
-                  table.insert(lines, "  " .. string.rep("─", 54))
-                  table.insert(lines, "  Press `<Space>` to reveal answer")
+                  table.insert(lines, "  Press <Space> or <CR> to reveal answer")
                 end
 
               else
@@ -101,6 +152,7 @@ return function(client, data)
                 local total_markers = #card.block_markers
                 local current_m = card.block_markers[reveal_state.step]
                 
+                local system_lines = {}
                 for i, line in ipairs(card.block_lines) do
                   if i > current_m.line_idx and not reveal_state.finished then
                     break -- Hide future lines
@@ -134,19 +186,24 @@ return function(client, data)
                       display_line = display_line:gsub(util.escape_magic_characters(m.raw), m.text)
                     end
                   end
-                  table.insert(lines, "  " .. display_line)
+                  table.insert(system_lines, display_line)
+                end
+
+                for _, l in ipairs(make_box("Sequence Review", table.concat(system_lines, "\n"), box_width)) do
+                  table.insert(lines, l)
                 end
                 
                 if not reveal_state.finished then
                   table.insert(lines, "")
-                  table.insert(lines, string.format("  *Step %d / %d* | Press `<Space>` to advance", reveal_state.step, total_markers))
+                  table.insert(lines, string.format("  *Step %d / %d* | Press <Space> to advance", reveal_state.step, total_markers))
                 end
               end
 
               if reveal_state.finished then
                 table.insert(lines, "")
-                table.insert(lines, "  " .. string.rep("━", 54))
-                table.insert(lines, "  [1] Again  [2] Hard  [3] Good  [4] Easy")
+                table.insert(lines, "  ╭────────────────────────── Rate Card ──────────────────────────╮")
+                table.insert(lines, "  │  🔴 [1] Again    🟡 [2] Hard    🟢 [3] Good    🔵 [4] Easy  │")
+                table.insert(lines, "  ╰───────────────────────────────────────────────────────────────╯")
                 table.insert(lines, string.format("  *(Interval: %dd, Ease: %.2f)*", card.interval, card.ease / 100))
               end
 
@@ -190,8 +247,8 @@ return function(client, data)
 
             review_buf = vim.api.nvim_create_buf(false, true)
             vim.api.nvim_buf_set_option(review_buf, "filetype", "markdown")
-            local width = math.min(70, vim.o.columns - 4)
-            local height = math.min(30, vim.o.lines - 4)
+            local width = 64
+            local height = math.min(26, vim.o.lines - 4)
             review_win = vim.api.nvim_open_win(review_buf, true, {
               relative = "editor", width = width, height = height,
               row = math.floor((vim.o.lines - height) / 2),
@@ -215,6 +272,7 @@ return function(client, data)
               util.open_buffer(card.file_path, { line = card.line_num })
             end)
 
+            apply_review_highlights(review_buf)
             render_card()
           end)
         end, { tag = tag })
